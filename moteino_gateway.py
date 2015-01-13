@@ -1,14 +1,11 @@
 #!/usr/bin/env python
 
-# Sample RFM69 receiver/gateway sketch, with ACK and optional encryption
+# Sample Moteino RFM69 receiver/gateway sketch, with ACK and optional encryption
 # Ported from Felix Rusu's original example code.
 
 from rfm69 import RFM69, RF69_433MHZ, RF69_868MHZ, RF69_915MHZ
-#import getch
-import threading
-import struct
 import time
-#from console import NonBlockingConsole
+import struct
 
 NODEID 				= 1     # unique for each node on same network
 NETWORKID 			= 100   # the same on all nodes that talk to each other
