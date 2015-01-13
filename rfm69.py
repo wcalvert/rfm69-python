@@ -38,7 +38,7 @@ import time
 
 SPI_BUS 						= 0
 SPI_CS  						= 0
-SPI_CLK_SPEED 					= 10000000
+SPI_CLK_SPEED 					= 5000000
 
 IRQ_PIN 						= "P9_12"
 CS_PIN 							= "P9_13"		# manual control of the silly cs pin is needed. Active low.
@@ -229,10 +229,8 @@ class RFM69(object):
 			self.send(toAddress, buffer, bufferSize, True)
 		sentTime = self.millis()
 		while self.millis()-sentTime<retryWaitTime:
-			pass
-		
-		if self.ACKReceived(toAddress):
-			return True
+			if self.ACKReceived(toAddress):
+				return True
 		return False
 	
 	# Should be polled immediately after sending a packet with ACK request
@@ -256,7 +254,7 @@ class RFM69(object):
 		self.sendFrame(sender, buffer, bufferSize, False, True)
 		self.RSSI = _RSSI #restore payload RSSI
 
-	def sendFrame(self, toAddress, buffer, bufferSize, requestACK, sendACK):
+	def sendFrame(self, toAddress, buffer, bufferSize, requestACK=False, sendACK=False):
 		GPIO.output(DEBUG_PIN, GPIO.HIGH)
 		self.setMode(RF69_MODE_STANDBY) #turn off receiver to prevent reception while filling fifo
 		while ((self.readReg(REG_IRQFLAGS1) & RF_IRQFLAGS1_MODEREADY) == 0x00):
@@ -278,8 +276,7 @@ class RFM69(object):
 			self.SPI.writebytes([0x00])
 		bufferBytes = []
 		for i in range(0, bufferSize):
-			bufferBytes.append(ord(buffer[i]))
-		self.SPI.writebytes(bufferBytes)
+			self.SPI.writebytes([ord(buffer[i])])
 		self.unselect()
 
 		# no need to wait for transmit mode to be ready since its handled by the radio
@@ -510,7 +507,7 @@ class RFM69(object):
 		self.setMode(RF69_MODE_STANDBY)
 		self.writeReg(REG_TEMP1, RF_TEMP1_MEAS_START)
 		while ((self.readReg(REG_TEMP1) & RF_TEMP1_MEAS_RUNNING)):
-			pass # Serial.print('*')
+			pass
 		#'complement'corrects the slope, rising temp = rising val
 		# COURSE_TEMP_COEF puts reading in the ballpark, user can add additional correction
 		return ~self.readReg(REG_TEMP2) + COURSE_TEMP_COEF + calFactor 
