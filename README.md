@@ -11,7 +11,7 @@ You'll need to install the [Adafruit BBIO library](https://github.com/adafruit/a
 Transmission, reception, acks, retries, encryption have been tested and seem to be working well.
 
 ##How-To
-Wire up the RFM60 module first. Then clone the repository, change to the directory, and try running the included examples as root:
+Wire up the RFM69 module first. Then clone the repository, change to the directory, and try running the included examples as root:
 
 ```
 git clone https://github.com/wcalvert/rfm69-python
@@ -24,6 +24,8 @@ python moteino_gateway.py
 The hardware SPI module is used. The pinout is:
 
 ```
+P9_1 or P9_2 = Gnd
+P9_3 or P9_4 = 3.3V
 P9_18 = MOSI
 P9_21 = MISO
 P9_22 = SCK 
