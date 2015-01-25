@@ -1,0 +1,23 @@
+package address_server;
+
+message address_server_message {
+	optional bytes uid = 1;
+
+	enum message_type {
+		DISCOVER = 0;
+		OFFER = 1;
+		REQUEST = 2;
+		ACK = 3;
+		NACK = 4;
+	}
+
+	optional message_type type = 2;
+
+	optional uint32 network = 3 [default = 1];
+
+	optional uint32 offered_address = 4;
+
+	optional uint32 ttl = 5;
+
+	optional uint32 ident = 6 [default = 4015];
+}
