@@ -1,7 +1,5 @@
-package address_server;
-
 message address_server_message {
-	optional bytes uid = 1;
+	optional string uid = 1;
 
 	enum message_type {
 		DISCOVER = 0;
@@ -19,5 +17,5 @@ message address_server_message {
 
 	optional uint32 ttl = 5;
 
-	optional uint32 ident = 6 [default = 4015];
+	optional uint32 ident = 6;
 }
