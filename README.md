@@ -31,9 +31,14 @@ P9_21 = MISO
 P9_22 = SCK 
 P9_12 = NSS
 P9_13 = DIO0 
+
+Optional:
+P9_11 = LED (Activity)
 ```
 
 The chip select (NSS) and interrupt pin (DIO0) can be adjusted in rfm69.py if desired. They are just normal GPIO pins.
 
+The LED pin (P9_11) will blink based on transmit or receive of data.
+
 ##Notes
-A pullup to 3.3V on the chip select is recommended, without it, the BBB will hang when it boots, probably due to a conflict with the SD card or something (I haven't checked the schematic to see what else is sharing that bus).
+A pullup to 3.3V on the chip select (NSS) is recommended, without it, the BBB will hang when it boots, probably due to a conflict with the SD card or something (I haven't checked the schematic to see what else is sharing that bus).

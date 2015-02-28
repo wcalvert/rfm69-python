@@ -41,7 +41,7 @@ SPI_CS  						= 0
 SPI_CLK_SPEED 					= 5000000
 
 DIO0_PIN 						= "P9_13"
-NSS_PIN 						= "P9_15"		# manual control of the silly cs pin is needed. Active low.
+NSS_PIN 						= "P9_12"		# manual control of the silly cs pin is needed. Active low.
 
 # to take advantage of the built in AES/CRC we want to limit the frame size to 
 # the internal FIFO size (66 bytes - 3 bytes overhead)

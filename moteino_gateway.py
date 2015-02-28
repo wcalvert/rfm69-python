@@ -13,11 +13,11 @@ NETWORKID 			= 100   # the same on all nodes that talk to each other
 # Match frequency to the hardware version of the radio on your Moteino (uncomment one):
 #FREQUENCY 			= rfm69.RF69_433MHZ
 #FREQUENCY 			= rfm69.RF69_868MHZ
-FREQUENCY 			= rfm69.RF69_915MHZ
+#FREQUENCY 			= rfm69.RF69_915MHZ
 ENCRYPTKEY 			= "sampleEncryptKey" # exactly the same 16 characters/bytes on all nodes!
-IS_RFM69HW 			= True  # uncomment only for RFM69HW! Leave out if you have RFM69W!
+IS_RFM69HW 			= False  # set to 'True' for RFM69HW! Otherwise leave as 'False' if you have RFM69W!
 ACK_TIME 			= 30    # max # of ms to wait for an ack
-promiscuousMode		= False # set to 'true' to sniff all packets on the same network
+promiscuousMode		= False # set to 'True' to sniff all packets on the same network
 LED_PIN 			= "P9_11"
 
 def main():
