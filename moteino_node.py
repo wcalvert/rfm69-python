@@ -13,7 +13,7 @@ GATEWAYID			= 1
 #Match frequency to the hardware version of the radio on your Moteino (uncomment one):
 #FREQUENCY			= rfm69.RF69_433MHZ
 #FREQUENCY			= rfm69.RF69_868MHZ
-FREQUENCY			= rfm69.RF69_915MHZ
+#FREQUENCY			= rfm69.RF69_915MHZ
 ENCRYPTKEY			= "sampleEncryptKey" #exactly the same 16 characters/bytes on all nodes!
 IS_RFM69HW			= False  # Set to 'True' for RFM69HW otherwise leave as 'False' if you have RFM69W!
 ACK_TIME			= 30 # max # of ms to wait for an ack
@@ -26,6 +26,10 @@ def main():
 	GPIO.setup(LED_PIN, GPIO.OUT)
 	GPIO.output(LED_PIN, GPIO.LOW)
 	radio = rfm69.RFM69()
+    freq_defined = 'FREQUENCY' in locals() or 'FREQUENCY' in globals()
+    if not freq_defined:
+        print "FREQUENCY value for specific module needs to be uncommented, exiting"
+        exit (1)
 	radio.initialize(FREQUENCY,NODEID,NETWORKID)
 	if IS_RFM69HW:
 		radio.setHighPower(IS_RFM69HW) #uncomment only for RFM69HW!

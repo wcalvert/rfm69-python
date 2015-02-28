@@ -24,6 +24,10 @@ def main():
 	GPIO.setup(LED_PIN, GPIO.OUT)
 	GPIO.output(LED_PIN, GPIO.LOW)
 	radio = rfm69.RFM69()
+    freq_defined = 'FREQUENCY' in locals() or 'FREQUENCY' in globals()
+    if not freq_defined:
+        print "FREQUENCY value for specific module needs to be uncommented, exiting"
+        exit (1)
 	radio.initialize(FREQUENCY,NODEID,NETWORKID)
 	if IS_RFM69HW:
 		radio.setHighPower(IS_RFM69HW) #only for RFM69HW!
