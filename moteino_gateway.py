@@ -27,8 +27,8 @@ def main():
 	radio.initialize(FREQUENCY,NODEID,NETWORKID)
 	if IS_RFM69HW:
 		radio.setHighPower(IS_RFM69HW) #only for RFM69HW!
-	radio.encrypt(ENCRYPTKEY)
-	radio.promiscuous(promiscuousMode)
+	radio.setEncryptionKey(ENCRYPTKEY)
+	radio.setPromiscuous(promiscuousMode)
 	print "Listening at {} MHz".format(433 if FREQUENCY==rfm69.RF69_433MHZ else (868 if FREQUENCY==rfm69.RF69_868MHZ else 915))
 
 	ackCount = 0

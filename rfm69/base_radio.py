@@ -1,37 +1,42 @@
+# This class serves as an interface definition for any radio or simulator.
+
 class BaseRadio(object):
 
 	def __init__(self):
 		pass
 
-	def Initialize(self, frequency, node, network):
-		pass
+	def initialize(self, freqBand, nodeId, networkID):
+		raise NotImplementedError
 
-	def SetHighPower(self, HighPower):
-		pass
+	def sleep(self):
+		raise NotImplementedError
 
-	def SetEncryptionKey(self, key):
-		pass
+	def setAddress(self, addr):
+		raise NotImplementedError
 
-	def SetPromiscuousMode(self, mode):
-		pass
+	def setNetwork(self, networkID):
+		raise NotImplementedError
 
-	def GetSenderId(self):
-		pass
+	def setPowerLevel(self, powerLevel):
+		raise NotImplementedError
 
-	def GetData(self):
-		pass
+	def send(self, toAddress, buffer, bufferSize, requestACK):
+		raise NotImplementedError
 
-	def SendAck(self):
-		pass
+	def sendWithRetry(self, toAddress, buffer, bufferSize, retries=2, retryWaitTime=40):
+		raise NotImplementedError
 
-	def AckRequested(self):
-		pass
+	def ACKReceived(self, fromNodeID):
+		raise NotImplementedError 
 
-	def ReceiveDone(self):
-		pass
+	def ACKRequested(self):
+		raise NotImplementedError
 
-	def SendWithRetry(self, toAddress, buffer, bufferSize, retries=2, retryWaitTime=40):
-		pass
+	def sendACK(self, buffer="", bufferSize=0):
+		raise NotImplementedError
 
-	def Send(self, toAddress, buffer, bufferSize, requestACK):
-		pass
+	def receiveDone(self):
+		raise NotImplementedError
+
+	def setEncryptionKey(self, key):
+		raise NotImplementedError

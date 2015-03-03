@@ -32,6 +32,7 @@
 from Adafruit_BBIO.SPI import SPI
 import Adafruit_BBIO.GPIO as GPIO
 from rfm69_registers import *
+from base_radio import BaseRadio
 import datetime
 import threading
 import time
@@ -68,7 +69,7 @@ RF69_CSMA_LIMIT_MS				= 1000
 RF69_TX_LIMIT_MS				= 1000
 RF69_FSTEP					 	= 61.03515625 # == FXOSC/2^19 = 32mhz/2^19 (p13 in DS)
 
-class RFM69(object):
+class RFM69(BaseRadio):
 	DATA = []	   
 	DATALEN = 0
 	SENDERID = 0
@@ -84,6 +85,7 @@ class RFM69(object):
 	_promiscuousMode = False
 	_powerLevel = 31
 	_isRFM69HW = True
+	
 	def __init__(self, isRFM69HW=True, interruptPin=DIO0_PIN, csPin=NSS_PIN):
 		self._isRFM69HW = isRFM69HW
 		self._interruptPin = interruptPin
@@ -102,10 +104,144 @@ class RFM69(object):
 
 		self.start_time = datetime.datetime.now()
 
-	def millis(self):
+	# Convention I want to stick to is a single underscore to indicate "private" methods.
+	# I'm grouping all the private stuff up at the beginning.
+
+	def _millis(self):
 		delta = datetime.datetime.now() - self.start_time
 		return delta.total_seconds() * 1000
+
+	def _readReg(self, addr):
+		self._select()
+		self.SPI.writebytes([addr & 0x7F])
+		result = self.SPI.readbytes(1)[0]
+		self._unselect()
+		return result
+
+	def _writeReg(self, addr, value):
+		self._select()
+		self.SPI.writebytes([addr | 0x80, value])
+		self._unselect()
+
+	# Select the transceiver
+	def _select(self):
+		GPIO.output(self._csPin, GPIO.LOW)
+
+	# Unselect the transceiver chip
+	def _unselect(self): 
+		GPIO.output(self._csPin, GPIO.HIGH)
 	
+	def _setMode(self, newMode):
+		if newMode == RF69_MODE_TX:
+			self._writeReg(REG_OPMODE, (self._readReg(REG_OPMODE) & 0xE3) | RF_OPMODE_TRANSMITTER)
+			if self._isRFM69HW:
+				self.setHighPowerRegs(True)
+		elif newMode == RF69_MODE_RX:
+			self._writeReg(REG_OPMODE, (self._readReg(REG_OPMODE) & 0xE3) | RF_OPMODE_RECEIVER)
+			if self._isRFM69HW:
+				self.setHighPowerRegs(False)
+		elif newMode == RF69_MODE_SYNTH:
+			self._writeReg(REG_OPMODE, (self._readReg(REG_OPMODE) & 0xE3) | RF_OPMODE_SYNTHESIZER)
+		elif newMode == RF69_MODE_STANDBY:
+			self._writeReg(REG_OPMODE, (self._readReg(REG_OPMODE) & 0xE3) | RF_OPMODE_STANDBY)
+		elif newMode == RF69_MODE_SLEEP:
+			self._writeReg(REG_OPMODE, (self._readReg(REG_OPMODE) & 0xE3) | RF_OPMODE_SLEEP)
+
+		# we are using packet mode, so this check is not really needed
+		# but waiting for mode ready is necessary when going from sleep because the FIFO may not 
+		# be immediately available from previous mode
+		while (self._mode == RF69_MODE_SLEEP and (self._readReg(REG_IRQFLAGS1) & RF_IRQFLAGS1_MODEREADY) == 0x00): # Wait for ModeReady
+			pass
+		self._mode = newMode
+
+	def _canSend(self):
+		#if signal stronger than -100dBm is detected assume channel activity
+		if (self._mode == RF69_MODE_RX and self.PAYLOADLEN == 0 and self.readRSSI() < CSMA_LIMIT): 
+			self._setMode(RF69_MODE_STANDBY)
+			return True
+		return False
+
+	def _sendFrame(self, toAddress, buffer, bufferSize, requestACK=False, sendACK=False):
+		self._setMode(RF69_MODE_STANDBY) #turn off receiver to prevent reception while filling fifo
+		while ((self._readReg(REG_IRQFLAGS1) & RF_IRQFLAGS1_MODEREADY) == 0x00):
+			pass # Wait for ModeReady
+		self._writeReg(REG_DIOMAPPING1, RF_DIOMAPPING1_DIO0_00) # DIO0 is "Packet Sent"
+		if bufferSize > RF69_MAX_DATA_LEN:
+			bufferSize = RF69_MAX_DATA_LEN
+
+		#write to FIFO
+		self._select()
+		self.SPI.writebytes([REG_FIFO | 0x80, bufferSize + 3, toAddress, self._address])
+
+		#control byte
+		if (sendACK):
+			self.SPI.writebytes([0x80])
+		elif (requestACK):
+			self.SPI.writebytes([0x40])
+		else:
+			self.SPI.writebytes([0x00])
+		bufferBytes = []
+		for i in range(0, bufferSize):
+			self.SPI.writebytes([ord(buffer[i])])
+		self._unselect()
+
+		# no need to wait for transmit mode to be ready since its handled by the radio
+		self._setMode(RF69_MODE_TX)
+		txStart = self._millis()
+		# wait for DIO0 to turn HIGH signalling transmission finish
+		while (GPIO.input(self._interruptPin) == 0 and self._millis()-txStart < RF69_TX_LIMIT_MS):
+			pass
+		self._setMode(RF69_MODE_STANDBY)
+
+	def _interruptHandler(self):
+		if (self._mode == RF69_MODE_RX and (self._readReg(REG_IRQFLAGS2) & RF_IRQFLAGS2_PAYLOADREADY)):
+			self._setMode(RF69_MODE_STANDBY)
+			self._select()
+			self.SPI.writebytes([REG_FIFO & 0x7f])
+			self.PAYLOADLEN = self.SPI.readbytes(1)[0]
+			self.PAYLOADLEN = 66 if self.PAYLOADLEN > 66 else self.PAYLOADLEN
+			self.TARGETID = self.SPI.readbytes(1)[0]
+			# match this node's address, or broadcast address or anything in promiscuous mode
+			# address situation could receive packets that are malformed and don't fit this libraries extra fields
+			if(not(self._promiscuousMode or self.TARGETID==self._address or self.TARGETID==RF69_BROADCAST_ADDR) or self.PAYLOADLEN < 3):
+				self.PAYLOADLEN = 0
+				self._unselect()
+				self._receiveBegin()
+				return
+
+			self.DATALEN = self.PAYLOADLEN - 3
+			self.SENDERID = self.SPI.readbytes(1)[0]
+			CTLbyte = self.SPI.readbytes(1)[0]
+
+			self.ACK_RECEIVED = CTLbyte & 0x80 #extract ACK-requested flag
+			self.ACK_REQUESTED = CTLbyte & 0x40 #extract ACK-received flag
+
+			self.DATA = self.SPI.readbytes(self.DATALEN)
+			self._unselect()
+			self._setMode(RF69_MODE_RX)
+		self.RSSI = self.readRSSI()
+
+	def _noInterrupts(self):
+		pass
+
+	def _interrupts(self):
+		pass
+
+	def _receiveBegin(self):
+		self.DATALEN = 0
+		self.SENDERID = 0
+		self.TARGETID = 0
+		self.PAYLOADLEN = 0
+		self.ACK_REQUESTED = 0
+		self.ACK_RECEIVED = 0
+		self.RSSI = 0
+		if (self._readReg(REG_IRQFLAGS2) & RF_IRQFLAGS2_PAYLOADREADY):
+			# avoid RX deadlocks
+			self._writeReg(REG_PACKETCONFIG2, (self._readReg(REG_PACKETCONFIG2) & 0xFB) | RF_PACKET2_RXRESTART)
+		#set DIO0 to "PAYLOADREADY" in receive mode
+		self._writeReg(REG_DIOMAPPING1, RF_DIOMAPPING1_DIO0_01) 
+		self._setMode(RF69_MODE_RX)
+
 	def initialize(self, freqBand, nodeId, networkID):
 		self._address = nodeId
 		config = [
@@ -147,74 +283,44 @@ class RFM69(object):
 			[255, 0]
 		]
 
-		while self.readReg(REG_SYNCVALUE1) != 0xaa:
-			self.writeReg(REG_SYNCVALUE1, 0xaa)
-		while self.readReg(REG_SYNCVALUE1) != 0x55:
-			self.writeReg(REG_SYNCVALUE1, 0x55)
+		while self._readReg(REG_SYNCVALUE1) != 0xaa:
+			self._writeReg(REG_SYNCVALUE1, 0xaa)
+		while self._readReg(REG_SYNCVALUE1) != 0x55:
+			self._writeReg(REG_SYNCVALUE1, 0x55)
 
 		for chunk in config:
-			self.writeReg(chunk[0], chunk[1])
+			self._writeReg(chunk[0], chunk[1])
 
-		self.encrypt(None)
+		self.setEncryptionKey(None)
 		self.setHighPower(self._isRFM69HW)
-		self.setMode(RF69_MODE_STANDBY)
+		self._setMode(RF69_MODE_STANDBY)
 		# wait for mode ready
-		while (self.readReg(REG_IRQFLAGS1) & RF_IRQFLAGS1_MODEREADY) == 0x00:
+		while (self._readReg(REG_IRQFLAGS1) & RF_IRQFLAGS1_MODEREADY) == 0x00:
 			pass
-		self.interrupts()
-	
-	def setMode(self, newMode):
-		if newMode == RF69_MODE_TX:
-			self.writeReg(REG_OPMODE, (self.readReg(REG_OPMODE) & 0xE3) | RF_OPMODE_TRANSMITTER)
-			if self._isRFM69HW:
-				self.setHighPowerRegs(True)
-		elif newMode == RF69_MODE_RX:
-			self.writeReg(REG_OPMODE, (self.readReg(REG_OPMODE) & 0xE3) | RF_OPMODE_RECEIVER)
-			if self._isRFM69HW:
-				self.setHighPowerRegs(False)
-		elif newMode == RF69_MODE_SYNTH:
-			self.writeReg(REG_OPMODE, (self.readReg(REG_OPMODE) & 0xE3) | RF_OPMODE_SYNTHESIZER)
-		elif newMode == RF69_MODE_STANDBY:
-			self.writeReg(REG_OPMODE, (self.readReg(REG_OPMODE) & 0xE3) | RF_OPMODE_STANDBY)
-		elif newMode == RF69_MODE_SLEEP:
-			self.writeReg(REG_OPMODE, (self.readReg(REG_OPMODE) & 0xE3) | RF_OPMODE_SLEEP)
-
-		# we are using packet mode, so this check is not really needed
-		# but waiting for mode ready is necessary when going from sleep because the FIFO may not 
-		# be immediately available from previous mode
-		while (self._mode == RF69_MODE_SLEEP and (self.readReg(REG_IRQFLAGS1) & RF_IRQFLAGS1_MODEREADY) == 0x00): # Wait for ModeReady
-			pass
-		self._mode = newMode
+		self._interrupts()
 
 	def sleep(self):
-		self.setMode(RF69_MODE_SLEEP)
+		self._setMode(RF69_MODE_SLEEP)
 
 	def setAddress(self, addr):
 		self._address = addr
-		self.writeReg(REG_NODEADRS, self._address)
+		self._writeReg(REG_NODEADRS, self._address)
 
 	def setNetwork(self, networkID):
-		self.writeReg(REG_SYNCVALUE2, networkID)
+		self._writeReg(REG_SYNCVALUE2, networkID)
 	
 	# set output power: 0=min, 31=max
 	# this results in a "weaker" transmitted signal, and directly results in a lower RSSI at the receiver
 	def setPowerLevel(self, powerLevel):
 		self._powerLevel = powerLevel
-		self.writeReg(REG_PALEVEL, (readReg(REG_PALEVEL) & 0xE0) | (self._powerLevel if self._powerLevel < 31 else 31))
-	
-	def canSend(self):
-		#if signal stronger than -100dBm is detected assume channel activity
-		if (self._mode == RF69_MODE_RX and self.PAYLOADLEN == 0 and self.readRSSI() < CSMA_LIMIT): 
-			self.setMode(RF69_MODE_STANDBY)
-			return True
-		return False
+		self._writeReg(REG_PALEVEL, (_readReg(REG_PALEVEL) & 0xE0) | (self._powerLevel if self._powerLevel < 31 else 31))
 
 	def send(self, toAddress, buffer, bufferSize, requestACK):
-		self.writeReg(REG_PACKETCONFIG2, (self.readReg(REG_PACKETCONFIG2) & 0xFB) | RF_PACKET2_RXRESTART) # avoid RX deadlocks
-		now = self.millis()
-		while (not self.canSend() and self.millis()-now < RF69_CSMA_LIMIT_MS):
+		self._writeReg(REG_PACKETCONFIG2, (self._readReg(REG_PACKETCONFIG2) & 0xFB) | RF_PACKET2_RXRESTART) # avoid RX deadlocks
+		now = self._millis()
+		while (not self._canSend() and self._millis()-now < RF69_CSMA_LIMIT_MS):
 			self.receiveDone()
-		self.sendFrame(toAddress, buffer, bufferSize, requestACK, False)
+		self._sendFrame(toAddress, buffer, bufferSize, requestACK, False)
 	
 	# to increase the chance of getting a packet across, call this function instead of send
 	# and it handles all the ACK requesting/retrying for you :)
@@ -225,290 +331,196 @@ class RFM69(object):
 	def sendWithRetry(self, toAddress, buffer, bufferSize, retries=2, retryWaitTime=40):
 		for i in range(0, retries):
 			self.send(toAddress, buffer, bufferSize, True)
-		sentTime = self.millis()
-		while self.millis()-sentTime<retryWaitTime:
+		sentTime = self._millis()
+		while self._millis()-sentTime<retryWaitTime:
 			if self.ACKReceived(toAddress):
 				return True
 		return False
 	
 	# Should be polled immediately after sending a packet with ACK request
-	def ACKReceived(self, fromNodeID): 
+	def ACKReceived(self, fromNodeID):
 		if self.receiveDone():
 			return (self.SENDERID == fromNodeID or fromNodeID == RF69_BROADCAST_ADDR) and self.ACK_RECEIVED
 		return False
 
 	#check whether an ACK was requested in the last received packet (non-broadcasted packet)
-	def ACKRequested(self): 
+	def ACKRequested(self):
 		return self.ACK_REQUESTED and (self.TARGETID != RF69_BROADCAST_ADDR)
 
 	# Should be called immediately after reception in case sender wants ACK
-	def sendACK(self, buffer="", bufferSize=0): 
+	def sendACK(self, buffer="", bufferSize=0):
 		sender = self.SENDERID
 		_RSSI = self.RSSI #save payload received RSSI value
-		self.writeReg(REG_PACKETCONFIG2, (self.readReg(REG_PACKETCONFIG2) & 0xFB) | RF_PACKET2_RXRESTART) # avoid RX deadlocks
-		now = self.millis()
-		while (not self.canSend() and self.millis()-now < RF69_CSMA_LIMIT_MS):
+		self._writeReg(REG_PACKETCONFIG2, (self._readReg(REG_PACKETCONFIG2) & 0xFB) | RF_PACKET2_RXRESTART) # avoid RX deadlocks
+		now = self._millis()
+		while (not self._canSend() and self._millis()-now < RF69_CSMA_LIMIT_MS):
 			self.receiveDone()
-		self.sendFrame(sender, buffer, bufferSize, False, True)
+		self._sendFrame(sender, buffer, bufferSize, False, True)
 		self.RSSI = _RSSI #restore payload RSSI
-
-	def sendFrame(self, toAddress, buffer, bufferSize, requestACK=False, sendACK=False):
-		self.setMode(RF69_MODE_STANDBY) #turn off receiver to prevent reception while filling fifo
-		while ((self.readReg(REG_IRQFLAGS1) & RF_IRQFLAGS1_MODEREADY) == 0x00):
-			pass # Wait for ModeReady
-		self.writeReg(REG_DIOMAPPING1, RF_DIOMAPPING1_DIO0_00) # DIO0 is "Packet Sent"
-		if bufferSize > RF69_MAX_DATA_LEN:
-			bufferSize = RF69_MAX_DATA_LEN
-
-		#write to FIFO
-		self.select()
-		self.SPI.writebytes([REG_FIFO | 0x80, bufferSize + 3, toAddress, self._address])
-
-		#control byte
-		if (sendACK):
-			self.SPI.writebytes([0x80])
-		elif (requestACK):
-			self.SPI.writebytes([0x40])
-		else:
-			self.SPI.writebytes([0x00])
-		bufferBytes = []
-		for i in range(0, bufferSize):
-			self.SPI.writebytes([ord(buffer[i])])
-		self.unselect()
-
-		# no need to wait for transmit mode to be ready since its handled by the radio
-		self.setMode(RF69_MODE_TX)
-		txStart = self.millis()
-		# wait for DIO0 to turn HIGH signalling transmission finish
-		while (GPIO.input(self._interruptPin) == 0 and self.millis()-txStart < RF69_TX_LIMIT_MS):
-			pass
-		self.setMode(RF69_MODE_STANDBY)
-
-	def interruptHandler(self):
-		if (self._mode == RF69_MODE_RX and (self.readReg(REG_IRQFLAGS2) & RF_IRQFLAGS2_PAYLOADREADY)):
-			self.setMode(RF69_MODE_STANDBY)
-			self.select()
-			self.SPI.writebytes([REG_FIFO & 0x7f])
-			self.PAYLOADLEN = self.SPI.readbytes(1)[0]
-			self.PAYLOADLEN = 66 if self.PAYLOADLEN > 66 else self.PAYLOADLEN
-			self.TARGETID = self.SPI.readbytes(1)[0]
-			# match this node's address, or broadcast address or anything in promiscuous mode
-			# address situation could receive packets that are malformed and don't fit this libraries extra fields
-			if(not(self._promiscuousMode or self.TARGETID==self._address or self.TARGETID==RF69_BROADCAST_ADDR) or self.PAYLOADLEN < 3):
-				self.PAYLOADLEN = 0
-				self.unselect()
-				self.receiveBegin()
-				return
-
-			self.DATALEN = self.PAYLOADLEN - 3
-			self.SENDERID = self.SPI.readbytes(1)[0]
-			CTLbyte = self.SPI.readbytes(1)[0]
-
-			self.ACK_RECEIVED = CTLbyte & 0x80 #extract ACK-requested flag
-			self.ACK_REQUESTED = CTLbyte & 0x40 #extract ACK-received flag
-
-			self.DATA = self.SPI.readbytes(self.DATALEN)
-			self.unselect()
-			self.setMode(RF69_MODE_RX)
-		self.RSSI = self.readRSSI()
-
-	def noInterrupts(self):
-		pass
-
-	def interrupts(self):
-		pass
-
-	def receiveBegin(self): 
-		self.DATALEN = 0
-		self.SENDERID = 0
-		self.TARGETID = 0
-		self.PAYLOADLEN = 0
-		self.ACK_REQUESTED = 0
-		self.ACK_RECEIVED = 0
-		self.RSSI = 0
-		if (self.readReg(REG_IRQFLAGS2) & RF_IRQFLAGS2_PAYLOADREADY):
-			# avoid RX deadlocks
-			self.writeReg(REG_PACKETCONFIG2, (self.readReg(REG_PACKETCONFIG2) & 0xFB) | RF_PACKET2_RXRESTART)
-		#set DIO0 to "PAYLOADREADY" in receive mode
-		self.writeReg(REG_DIOMAPPING1, RF_DIOMAPPING1_DIO0_01) 
-		self.setMode(RF69_MODE_RX)
 	
-	def receiveDone(self): 
-		self.noInterrupts() #re-enabled in unselect() via setMode() or via receiveBegin()
+	def receiveDone(self):
+		self._noInterrupts() #re-enabled in _unselect() via _setMode() or via _receiveBegin()
 		if GPIO.input(self._interruptPin):
-			self.interruptHandler()
+			self._interruptHandler()
 		if (self._mode == RF69_MODE_RX and self.PAYLOADLEN > 0):
-			self.setMode(RF69_MODE_STANDBY) #enables interrupts
+			self._setMode(RF69_MODE_STANDBY) #enables interrupts
 			return True
 		elif (self._mode == RF69_MODE_RX):  #already in RX no payload yet
-			self.interrupts() #explicitly re-enable interrupts
+			self._interrupts() #explicitly re-enable interrupts
 			return False
-		self.receiveBegin()
+		self._receiveBegin()
 		return False
 	
 	# To enable encryption: radio.encrypt("ABCDEFGHIJKLMNOP")
 	# To disable encryption: radio.encrypt(null)
 	# KEY HAS TO BE 16 bytes !!!
-	def encrypt(self, key):
-		self.setMode(RF69_MODE_STANDBY)
+	def setEncryptionKey(self, key):
+		if key is not None:
+			if len(key) != 16:
+				raise Exception("Key must be exactly 16 bytes!")
+		self._setMode(RF69_MODE_STANDBY)
 		if (key is not None):
 			keyBytes = []
-			self.select()
+			self._select()
 			self.SPI.writebytes([REG_AESKEY1 | 0x80])
 			for i in range(0,16):
 				keyBytes.append(ord(key[i]))
 			self.SPI.writebytes(keyBytes)
-			self.unselect()
-		self.writeReg(REG_PACKETCONFIG2, (self.readReg(REG_PACKETCONFIG2) & 0xFE) | (0 if key is None else 1))
+			self._unselect()
+		self._writeReg(REG_PACKETCONFIG2, (self._readReg(REG_PACKETCONFIG2) & 0xFE) | (0 if key is None else 1))
 
-	def readRSSI(self, forceTrigger=False):
+	# The following methods are not required by BaseRadio.
+	# They depend too heavily on the specific radio hardware and would not get any benefit from being part of the
+	# BaseRadio class.
+
+	def getRSSI(self, forceTrigger=False):
 		rssi = 0
 		if (forceTrigger):
 			# RSSI trigger not needed if DAGC is in continuous mode
-			self.writeReg(REG_RSSICONFIG, RF_RSSI_START)
-			while ((self.readReg(REG_RSSICONFIG) & RF_RSSI_DONE) == 0x00):
+			self._writeReg(REG_RSSICONFIG, RF_RSSI_START)
+			while ((self._readReg(REG_RSSICONFIG) & RF_RSSI_DONE) == 0x00):
 				pass # Wait for RSSI_Ready
-		rssi = -self.readReg(REG_RSSIVALUE)
+		rssi = -self._readReg(REG_RSSIVALUE)
 		rssi >>= 1
 		return rssi
 
-	def readReg(self, addr):
-		self.select()
-		self.SPI.writebytes([addr & 0x7F])
-		result = self.SPI.readbytes(1)[0]
-		self.unselect()
-		return result
-
-	def writeReg(self, addr, value):
-		self.select()
-		self.SPI.writebytes([addr | 0x80, value])
-		self.unselect()
-
-	# Select the transceiver
-	def select(self):
-		GPIO.output(self._csPin, GPIO.LOW)
-
-	# Unselect the transceiver chip
-	def unselect(self): 
-		GPIO.output(self._csPin, GPIO.HIGH)
-
 	# ON  = disable filtering to capture all frames on network
 	# OFF = enable node+broadcast filtering to capture only frames sent to this/broadcast address
-	def promiscuous(self, onOff):
+	def setPromiscuous(self, onOff):
 		self._promiscuousMode = onOff
 
 	def setHighPower(self, onOff):
 		self._isRFM69HW = onOff
-		self.writeReg(REG_OCP, RF_OCP_OFF if self._isRFM69HW else RF_OCP_ON)
+		self._writeReg(REG_OCP, RF_OCP_OFF if self._isRFM69HW else RF_OCP_ON)
 		if (self._isRFM69HW):
 			# enable P1 & P2 amplifier stages
-			self.writeReg(REG_PALEVEL, (self.readReg(REG_PALEVEL) & 0x1F) | RF_PALEVEL_PA1_ON | RF_PALEVEL_PA2_ON) 
+			self._writeReg(REG_PALEVEL, (self._readReg(REG_PALEVEL) & 0x1F) | RF_PALEVEL_PA1_ON | RF_PALEVEL_PA2_ON) 
 		else:
 			# enable P0 only
-			self.writeReg(REG_PALEVEL, RF_PALEVEL_PA0_ON | RF_PALEVEL_PA1_OFF | RF_PALEVEL_PA2_OFF | self.powerLevel) 
+			self._writeReg(REG_PALEVEL, RF_PALEVEL_PA0_ON | RF_PALEVEL_PA1_OFF | RF_PALEVEL_PA2_OFF | self.powerLevel) 
 
 	def setHighPowerRegs(self, onOff):
-		self.writeReg(REG_TESTPA1, 0x5D if onOff else 0x55)
-		self.writeReg(REG_TESTPA2, 0x7C if onOff else 0x70)
+		self._writeReg(REG_TESTPA1, 0x5D if onOff else 0x55)
+		self._writeReg(REG_TESTPA2, 0x7C if onOff else 0x70)
 	
 	def readAllRegs(self):
 		print "Register, Address, Value"
-		print "REG_FIFO, 0x00, {}".format(hex(self.readReg(REG_FIFO)))
-		print "REG_OPMODE, 0x01, {}".format(hex(self.readReg(REG_OPMODE)))
-		print "REG_DATAMODUL, 0x02, {}".format(hex(self.readReg(REG_DATAMODUL)))
-		print "REG_BITRATEMSB, 0x03, {}".format(hex(self.readReg(REG_BITRATEMSB)))
-		print "REG_BITRATELSB, 0x04, {}".format(hex(self.readReg(REG_BITRATELSB)))
-		print "REG_FDEVMSB, 0x05, {}".format(hex(self.readReg(REG_FDEVMSB)))
-		print "REG_FDEVLSB, 0x06, {}".format(hex(self.readReg(REG_FDEVLSB)))
-		print "REG_FRFMSB, 0x07, {}".format(hex(self.readReg(REG_FRFMSB)))
-		print "REG_FRFMID, 0x08, {}".format(hex(self.readReg(REG_FRFMID)))
-		print "REG_FRFLSB, 0x09, {}".format(hex(self.readReg(REG_FRFLSB)))
-		print "REG_OSC1, 0x0A, {}".format(hex(self.readReg(REG_OSC1)))
-		print "REG_AFCCTRL, 0x0B, {}".format(hex(self.readReg(REG_AFCCTRL)))
-		print "REG_LOWBAT, 0x0C, {}".format(hex(self.readReg(REG_LOWBAT)))
-		print "REG_LISTEN1, 0x0D, {}".format(hex(self.readReg(REG_LISTEN1)))
-		print "REG_LISTEN2, 0x0E, {}".format(hex(self.readReg(REG_LISTEN2)))
-		print "REG_LISTEN3, 0x0F, {}".format(hex(self.readReg(REG_LISTEN3)))
-		print "REG_VERSION, 0x10, {}".format(hex(self.readReg(REG_VERSION)))
-		print "REG_PALEVEL, 0x11, {}".format(hex(self.readReg(REG_PALEVEL)))
-		print "REG_PARAMP, 0x12, {}".format(hex(self.readReg(REG_PARAMP)))
-		print "REG_OCP, 0x13, {}".format(hex(self.readReg(REG_OCP)))
-		print "REG_AGCREF, 0x14, {}".format(hex(self.readReg(REG_AGCREF)))
-		print "REG_AGCTHRESH1, 0x15, {}".format(hex(self.readReg(REG_AGCTHRESH1)))
-		print "REG_AGCTHRESH2, 0x16, {}".format(hex(self.readReg(REG_AGCTHRESH2)))
-		print "REG_AGCTHRESH3, 0x17, {}".format(hex(self.readReg(REG_AGCTHRESH3)))
-		print "REG_LNA, 0x18, {}".format(hex(self.readReg(REG_LNA)))
-		print "REG_RXBW, 0x19, {}".format(hex(self.readReg(REG_RXBW)))
-		print "REG_AFCBW, 0x1A, {}".format(hex(self.readReg(REG_AFCBW)))
-		print "REG_OOKPEAK, 0x1B, {}".format(hex(self.readReg(REG_OOKPEAK)))
-		print "REG_OOKAVG, 0x1C, {}".format(hex(self.readReg(REG_OOKAVG)))
-		print "REG_OOKFIX, 0x1D, {}".format(hex(self.readReg(REG_OOKFIX)))
-		print "REG_AFCFEI, 0x1E, {}".format(hex(self.readReg(REG_AFCFEI)))
-		print "REG_AFCMSB, 0x1F, {}".format(hex(self.readReg(REG_AFCMSB)))
-		print "REG_AFCLSB, 0x20, {}".format(hex(self.readReg(REG_AFCLSB)))
-		print "REG_FEIMSB, 0x21, {}".format(hex(self.readReg(REG_FEIMSB)))
-		print "REG_FEILSB, 0x22, {}".format(hex(self.readReg(REG_FEILSB)))
-		print "REG_RSSICONFIG, 0x23, {}".format(hex(self.readReg(REG_RSSICONFIG)))
-		print "REG_RSSIVALUE, 0x24, {}".format(hex(self.readReg(REG_RSSIVALUE)))
-		print "REG_DIOMAPPING1, 0x25, {}".format(hex(self.readReg(REG_DIOMAPPING1)))
-		print "REG_DIOMAPPING2, 0x26, {}".format(hex(self.readReg(REG_DIOMAPPING2)))
-		print "REG_IRQFLAGS1, 0x27, {}".format(hex(self.readReg(REG_IRQFLAGS1)))
-		print "REG_IRQFLAGS2, 0x28, {}".format(hex(self.readReg(REG_IRQFLAGS2)))
-		print "REG_RSSITHRESH, 0x29, {}".format(hex(self.readReg(REG_RSSITHRESH)))
-		print "REG_RXTIMEOUT1, 0x2A, {}".format(hex(self.readReg(REG_RXTIMEOUT1)))
-		print "REG_RXTIMEOUT2, 0x2B, {}".format(hex(self.readReg(REG_RXTIMEOUT2)))
-		print "REG_PREAMBLEMSB, 0x2C, {}".format(hex(self.readReg(REG_PREAMBLEMSB)))
-		print "REG_PREAMBLELSB, 0x2D, {}".format(hex(self.readReg(REG_PREAMBLELSB)))
-		print "REG_SYNCCONFIG, 0x2E, {}".format(hex(self.readReg(REG_SYNCCONFIG)))
-		print "REG_SYNCVALUE1, 0x2F, {}".format(hex(self.readReg(REG_SYNCVALUE1)))
-		print "REG_SYNCVALUE2, 0x30, {}".format(hex(self.readReg(REG_SYNCVALUE2)))
-		print "REG_SYNCVALUE3, 0x31, {}".format(hex(self.readReg(REG_SYNCVALUE3)))
-		print "REG_SYNCVALUE4, 0x32, {}".format(hex(self.readReg(REG_SYNCVALUE4)))
-		print "REG_SYNCVALUE5, 0x33, {}".format(hex(self.readReg(REG_SYNCVALUE5)))
-		print "REG_SYNCVALUE6, 0x34, {}".format(hex(self.readReg(REG_SYNCVALUE6)))
-		print "REG_SYNCVALUE7, 0x35, {}".format(hex(self.readReg(REG_SYNCVALUE7)))
-		print "REG_SYNCVALUE8, 0x36, {}".format(hex(self.readReg(REG_SYNCVALUE8)))
-		print "REG_PACKETCONFIG1, 0x37, {}".format(hex(self.readReg(REG_PACKETCONFIG1)))
-		print "REG_PAYLOADLENGTH, 0x38, {}".format(hex(self.readReg(REG_PAYLOADLENGTH)))
-		print "REG_NODEADRS, 0x39, {}".format(hex(self.readReg(REG_NODEADRS)))
-		print "REG_BROADCASTADRS, 0x3A, {}".format(hex(self.readReg(REG_BROADCASTADRS)))
-		print "REG_AUTOMODES, 0x3B, {}".format(hex(self.readReg(REG_AUTOMODES)))
-		print "REG_FIFOTHRESH, 0x3C, {}".format(hex(self.readReg(REG_FIFOTHRESH)))
-		print "REG_PACKETCONFIG2, 0x3D, {}".format(hex(self.readReg(REG_PACKETCONFIG2)))
-		print "REG_AESKEY1, 0x3E, {}".format(hex(self.readReg(REG_AESKEY1)))
-		print "REG_AESKEY2, 0x3F, {}".format(hex(self.readReg(REG_AESKEY2)))
-		print "REG_AESKEY3, 0x40, {}".format(hex(self.readReg(REG_AESKEY3)))
-		print "REG_AESKEY4, 0x41, {}".format(hex(self.readReg(REG_AESKEY4)))
-		print "REG_AESKEY5, 0x42, {}".format(hex(self.readReg(REG_AESKEY5)))
-		print "REG_AESKEY6, 0x43, {}".format(hex(self.readReg(REG_AESKEY6)))
-		print "REG_AESKEY7, 0x44, {}".format(hex(self.readReg(REG_AESKEY7)))
-		print "REG_AESKEY8, 0x45, {}".format(hex(self.readReg(REG_AESKEY8)))
-		print "REG_AESKEY9, 0x46, {}".format(hex(self.readReg(REG_AESKEY9)))
-		print "REG_AESKEY10, 0x47, {}".format(hex(self.readReg(REG_AESKEY10)))
-		print "REG_AESKEY11, 0x48, {}".format(hex(self.readReg(REG_AESKEY11)))
-		print "REG_AESKEY12, 0x49, {}".format(hex(self.readReg(REG_AESKEY12)))
-		print "REG_AESKEY13, 0x4A, {}".format(hex(self.readReg(REG_AESKEY13)))
-		print "REG_AESKEY14, 0x4B, {}".format(hex(self.readReg(REG_AESKEY14)))
-		print "REG_AESKEY15, 0x4C, {}".format(hex(self.readReg(REG_AESKEY15)))
-		print "REG_AESKEY16, 0x4D, {}".format(hex(self.readReg(REG_AESKEY16)))
-		print "REG_TEMP1, 0x4E, {}".format(hex(self.readReg(REG_TEMP1)))
-		print "REG_TEMP2, 0x4F, {}".format(hex(self.readReg(REG_TEMP2)))
+		print "REG_FIFO, 0x00, {}".format(hex(self._readReg(REG_FIFO)))
+		print "REG_OPMODE, 0x01, {}".format(hex(self._readReg(REG_OPMODE)))
+		print "REG_DATAMODUL, 0x02, {}".format(hex(self._readReg(REG_DATAMODUL)))
+		print "REG_BITRATEMSB, 0x03, {}".format(hex(self._readReg(REG_BITRATEMSB)))
+		print "REG_BITRATELSB, 0x04, {}".format(hex(self._readReg(REG_BITRATELSB)))
+		print "REG_FDEVMSB, 0x05, {}".format(hex(self._readReg(REG_FDEVMSB)))
+		print "REG_FDEVLSB, 0x06, {}".format(hex(self._readReg(REG_FDEVLSB)))
+		print "REG_FRFMSB, 0x07, {}".format(hex(self._readReg(REG_FRFMSB)))
+		print "REG_FRFMID, 0x08, {}".format(hex(self._readReg(REG_FRFMID)))
+		print "REG_FRFLSB, 0x09, {}".format(hex(self._readReg(REG_FRFLSB)))
+		print "REG_OSC1, 0x0A, {}".format(hex(self._readReg(REG_OSC1)))
+		print "REG_AFCCTRL, 0x0B, {}".format(hex(self._readReg(REG_AFCCTRL)))
+		print "REG_LOWBAT, 0x0C, {}".format(hex(self._readReg(REG_LOWBAT)))
+		print "REG_LISTEN1, 0x0D, {}".format(hex(self._readReg(REG_LISTEN1)))
+		print "REG_LISTEN2, 0x0E, {}".format(hex(self._readReg(REG_LISTEN2)))
+		print "REG_LISTEN3, 0x0F, {}".format(hex(self._readReg(REG_LISTEN3)))
+		print "REG_VERSION, 0x10, {}".format(hex(self._readReg(REG_VERSION)))
+		print "REG_PALEVEL, 0x11, {}".format(hex(self._readReg(REG_PALEVEL)))
+		print "REG_PARAMP, 0x12, {}".format(hex(self._readReg(REG_PARAMP)))
+		print "REG_OCP, 0x13, {}".format(hex(self._readReg(REG_OCP)))
+		print "REG_AGCREF, 0x14, {}".format(hex(self._readReg(REG_AGCREF)))
+		print "REG_AGCTHRESH1, 0x15, {}".format(hex(self._readReg(REG_AGCTHRESH1)))
+		print "REG_AGCTHRESH2, 0x16, {}".format(hex(self._readReg(REG_AGCTHRESH2)))
+		print "REG_AGCTHRESH3, 0x17, {}".format(hex(self._readReg(REG_AGCTHRESH3)))
+		print "REG_LNA, 0x18, {}".format(hex(self._readReg(REG_LNA)))
+		print "REG_RXBW, 0x19, {}".format(hex(self._readReg(REG_RXBW)))
+		print "REG_AFCBW, 0x1A, {}".format(hex(self._readReg(REG_AFCBW)))
+		print "REG_OOKPEAK, 0x1B, {}".format(hex(self._readReg(REG_OOKPEAK)))
+		print "REG_OOKAVG, 0x1C, {}".format(hex(self._readReg(REG_OOKAVG)))
+		print "REG_OOKFIX, 0x1D, {}".format(hex(self._readReg(REG_OOKFIX)))
+		print "REG_AFCFEI, 0x1E, {}".format(hex(self._readReg(REG_AFCFEI)))
+		print "REG_AFCMSB, 0x1F, {}".format(hex(self._readReg(REG_AFCMSB)))
+		print "REG_AFCLSB, 0x20, {}".format(hex(self._readReg(REG_AFCLSB)))
+		print "REG_FEIMSB, 0x21, {}".format(hex(self._readReg(REG_FEIMSB)))
+		print "REG_FEILSB, 0x22, {}".format(hex(self._readReg(REG_FEILSB)))
+		print "REG_RSSICONFIG, 0x23, {}".format(hex(self._readReg(REG_RSSICONFIG)))
+		print "REG_RSSIVALUE, 0x24, {}".format(hex(self._readReg(REG_RSSIVALUE)))
+		print "REG_DIOMAPPING1, 0x25, {}".format(hex(self._readReg(REG_DIOMAPPING1)))
+		print "REG_DIOMAPPING2, 0x26, {}".format(hex(self._readReg(REG_DIOMAPPING2)))
+		print "REG_IRQFLAGS1, 0x27, {}".format(hex(self._readReg(REG_IRQFLAGS1)))
+		print "REG_IRQFLAGS2, 0x28, {}".format(hex(self._readReg(REG_IRQFLAGS2)))
+		print "REG_RSSITHRESH, 0x29, {}".format(hex(self._readReg(REG_RSSITHRESH)))
+		print "REG_RXTIMEOUT1, 0x2A, {}".format(hex(self._readReg(REG_RXTIMEOUT1)))
+		print "REG_RXTIMEOUT2, 0x2B, {}".format(hex(self._readReg(REG_RXTIMEOUT2)))
+		print "REG_PREAMBLEMSB, 0x2C, {}".format(hex(self._readReg(REG_PREAMBLEMSB)))
+		print "REG_PREAMBLELSB, 0x2D, {}".format(hex(self._readReg(REG_PREAMBLELSB)))
+		print "REG_SYNCCONFIG, 0x2E, {}".format(hex(self._readReg(REG_SYNCCONFIG)))
+		print "REG_SYNCVALUE1, 0x2F, {}".format(hex(self._readReg(REG_SYNCVALUE1)))
+		print "REG_SYNCVALUE2, 0x30, {}".format(hex(self._readReg(REG_SYNCVALUE2)))
+		print "REG_SYNCVALUE3, 0x31, {}".format(hex(self._readReg(REG_SYNCVALUE3)))
+		print "REG_SYNCVALUE4, 0x32, {}".format(hex(self._readReg(REG_SYNCVALUE4)))
+		print "REG_SYNCVALUE5, 0x33, {}".format(hex(self._readReg(REG_SYNCVALUE5)))
+		print "REG_SYNCVALUE6, 0x34, {}".format(hex(self._readReg(REG_SYNCVALUE6)))
+		print "REG_SYNCVALUE7, 0x35, {}".format(hex(self._readReg(REG_SYNCVALUE7)))
+		print "REG_SYNCVALUE8, 0x36, {}".format(hex(self._readReg(REG_SYNCVALUE8)))
+		print "REG_PACKETCONFIG1, 0x37, {}".format(hex(self._readReg(REG_PACKETCONFIG1)))
+		print "REG_PAYLOADLENGTH, 0x38, {}".format(hex(self._readReg(REG_PAYLOADLENGTH)))
+		print "REG_NODEADRS, 0x39, {}".format(hex(self._readReg(REG_NODEADRS)))
+		print "REG_BROADCASTADRS, 0x3A, {}".format(hex(self._readReg(REG_BROADCASTADRS)))
+		print "REG_AUTOMODES, 0x3B, {}".format(hex(self._readReg(REG_AUTOMODES)))
+		print "REG_FIFOTHRESH, 0x3C, {}".format(hex(self._readReg(REG_FIFOTHRESH)))
+		print "REG_PACKETCONFIG2, 0x3D, {}".format(hex(self._readReg(REG_PACKETCONFIG2)))
+		print "REG_AESKEY1, 0x3E, {}".format(hex(self._readReg(REG_AESKEY1)))
+		print "REG_AESKEY2, 0x3F, {}".format(hex(self._readReg(REG_AESKEY2)))
+		print "REG_AESKEY3, 0x40, {}".format(hex(self._readReg(REG_AESKEY3)))
+		print "REG_AESKEY4, 0x41, {}".format(hex(self._readReg(REG_AESKEY4)))
+		print "REG_AESKEY5, 0x42, {}".format(hex(self._readReg(REG_AESKEY5)))
+		print "REG_AESKEY6, 0x43, {}".format(hex(self._readReg(REG_AESKEY6)))
+		print "REG_AESKEY7, 0x44, {}".format(hex(self._readReg(REG_AESKEY7)))
+		print "REG_AESKEY8, 0x45, {}".format(hex(self._readReg(REG_AESKEY8)))
+		print "REG_AESKEY9, 0x46, {}".format(hex(self._readReg(REG_AESKEY9)))
+		print "REG_AESKEY10, 0x47, {}".format(hex(self._readReg(REG_AESKEY10)))
+		print "REG_AESKEY11, 0x48, {}".format(hex(self._readReg(REG_AESKEY11)))
+		print "REG_AESKEY12, 0x49, {}".format(hex(self._readReg(REG_AESKEY12)))
+		print "REG_AESKEY13, 0x4A, {}".format(hex(self._readReg(REG_AESKEY13)))
+		print "REG_AESKEY14, 0x4B, {}".format(hex(self._readReg(REG_AESKEY14)))
+		print "REG_AESKEY15, 0x4C, {}".format(hex(self._readReg(REG_AESKEY15)))
+		print "REG_AESKEY16, 0x4D, {}".format(hex(self._readReg(REG_AESKEY16)))
+		print "REG_TEMP1, 0x4E, {}".format(hex(self._readReg(REG_TEMP1)))
+		print "REG_TEMP2, 0x4F, {}".format(hex(self._readReg(REG_TEMP2)))
 		if self._isRFM69HW:
-			print "REG_TESTPA1, 0x5A, {}".format(hex(self.readReg(REG_TESTPA1)))
-			print "REG_TESTPA2, 0x5C, {}".format(hex(self.readReg(REG_TESTPA2)))
-		print "REG_TESTDAGC, 0x6F, {}".format(hex(self.readReg(REG_TESTDAGC)))
+			print "REG_TESTPA1, 0x5A, {}".format(hex(self._readReg(REG_TESTPA1)))
+			print "REG_TESTPA2, 0x5C, {}".format(hex(self._readReg(REG_TESTPA2)))
+		print "REG_TESTDAGC, 0x6F, {}".format(hex(self._readReg(REG_TESTDAGC)))
 
 	# returns centigrade
 	def readTemperature(self, calFactor):  
-		self.setMode(RF69_MODE_STANDBY)
-		self.writeReg(REG_TEMP1, RF_TEMP1_MEAS_START)
-		while ((self.readReg(REG_TEMP1) & RF_TEMP1_MEAS_RUNNING)):
+		self._setMode(RF69_MODE_STANDBY)
+		self._writeReg(REG_TEMP1, RF_TEMP1_MEAS_START)
+		while ((self._readReg(REG_TEMP1) & RF_TEMP1_MEAS_RUNNING)):
 			pass
 		#'complement'corrects the slope, rising temp = rising val
 		# COURSE_TEMP_COEF puts reading in the ballpark, user can add additional correction
-		return ~self.readReg(REG_TEMP2) + COURSE_TEMP_COEF + calFactor 
+		return ~self._readReg(REG_TEMP2) + COURSE_TEMP_COEF + calFactor 
 
 	def rcCalibration(self):
-		writeReg(REG_OSC1, RF_OSC1_RCCAL_START)
-		while ((readReg(REG_OSC1) & RF_OSC1_RCCAL_DONE) == 0x00):
+		_writeReg(REG_OSC1, RF_OSC1_RCCAL_START)
+		while ((_readReg(REG_OSC1) & RF_OSC1_RCCAL_DONE) == 0x00):
 			pass
