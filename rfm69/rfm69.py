@@ -70,7 +70,7 @@ RF69_TX_LIMIT_MS				= 1000
 RF69_FSTEP					 	= 61.03515625 # == FXOSC/2^19 = 32mhz/2^19 (p13 in DS)
 
 class RFM69(BaseRadio):
-	DATA = []	   
+	DATA = []
 	DATALEN = 0
 	SENDERID = 0
 	TARGETID = 0
