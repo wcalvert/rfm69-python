@@ -1,0 +1,6 @@
+[Core]
+Name = email
+Module = email
+
+[Documentation]
+Description = Email Plugin via Mailgun

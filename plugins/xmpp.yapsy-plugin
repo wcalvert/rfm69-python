@@ -1,0 +1,6 @@
+[Core]
+Name = xmpp
+Module = xmpp
+
+[Documentation]
+Description = XMPP (GChat) Plugin

@@ -1,0 +1,6 @@
+[Core]
+Name = firebase
+Module = firebase
+
+[Documentation]
+Description = Firebase Plugin

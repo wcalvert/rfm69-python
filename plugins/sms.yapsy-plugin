@@ -1,0 +1,6 @@
+[Core]
+Name = sms
+Module = sms
+
+[Documentation]
+Description = SMS Plugin via Twilio
