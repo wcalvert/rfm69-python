@@ -1,6 +1,7 @@
 # **********************************************************************************
 # Registers used in driver definition for HopeRF RFM69W/RFM69HW, Semtech SX1231/1231H
 # **********************************************************************************
+# This file adapted from Felix Rusu's original work:
 # Copyright Felix Rusu (2014), felix@lowpowerlab.com
 # http:#lowpowerlab.com/
 # **********************************************************************************

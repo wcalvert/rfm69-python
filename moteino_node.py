@@ -4,7 +4,7 @@
 # Ported from Felix Rusu's original example code.
 
 import Adafruit_BBIO.GPIO as GPIO
-from rfm69 import rfm69
+from radios import rfm69
 import time
 
 NODEID				= 2    #unique for each node on same network
