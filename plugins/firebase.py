@@ -28,16 +28,16 @@ class FirebasePlugin(IPlugin):
 			raise Exception(err)
 		try:
 			conf = yaml.load(data)
-			self._firebase_url = conf["firebase_url"]
-			self._secret = conf["secret"]
-			self._data_bucket = conf["data_bucket"]
+			self.firebase_url = conf["firebase_url"]
+			self.secret = conf["secret"]
+			self.data_bucket = conf["data_bucket"]
 		except:
 			raise Exception("Error parsing {}!".format(secrets_filename))
-		if self._firebase_url is None or self._secret is None:
+		if self.firebase_url is None or self.secret is None:
 			raise Exception("Error parsing {} - not all fields have been filled in!".format(secrets_filename))
 		auth_payload = {"uid": "1", "auth_data": "foo", "other_auth_data": "bar"}
-		token = create_token(self._secret, auth_payload)
-		self._client = Firebase(self._firebase_url + self._data_bucket, auth_token=token)
+		token = create_token(self.secret, auth_payload)
+		self._client = Firebase(self.firebase_url + self.data_bucket, auth_token=token)
 
 	def process_message(self):
 		message = messages[random.randint(0, len(messages)-1)]
