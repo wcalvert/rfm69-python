@@ -1,0 +1,85 @@
+message P1 {
+
+	enum address_message_type {
+		DISCOVER = 0;
+		OFFER = 1;
+		REQUEST = 2;
+		ACK = 3;
+		NACK = 4;
+	}
+
+	optional address_message_type addr_msg_type = 0;
+
+	enum automation_message_type {
+		DATA = 5;
+		EVENT = 6;
+		REQUEST = 7;
+		RESPONSE = 8;
+	}
+
+	optional automation_message_type automation_msg_type = 1;
+
+	enum data_type_ {
+		BATTERY_LEVEL = 0;
+		TEMPERATURE = 1;
+		HUMIDITY = 2;
+		BAROMETRIC_PRESSURE = 3;
+		LUX_VISIBLE = 4;
+		LUX_IR = 5;
+		LUX_UV = 6;
+		WIND_SPEED = 7;
+		WIND_DIRECTION = 8;
+		PRECIPITATION = 9;
+		SOIL_MOISTURE = 10;
+		VOLTAGE = 11;
+		CURRENT = 12;
+		TIMESTAMP = 13;
+	}
+
+	optional data_type_ data_type = 2;
+
+	enum event_type_ {
+		HEARTBEAT = 0;
+		PROXIMITY_DETECTED = 1;
+		MOTION_DETECTED = 2;
+		SOUND_DETECTED = 3;
+		SMOKE_DETECTED = 4;
+		OCCUPANCY_DETECTED = 5;
+		DOOR_OPENED = 6;
+		DOOR_CLOSED = 7;
+		WINDOW_OPENED = 8;
+		WINDOW_CLOSED = 9;
+		LIGHT_TURNED_ON = 10;
+		LIGHT_TURNED_OFF = 11;
+		APPLIANCE_TURNED_ON = 12;
+		APPLIANCE_TURNED_OFF = 13;
+		CREDENTIALS_ACCEPTED = 14;
+		CREDENTIALS_REJECTED = 15;
+	}
+
+	optional event_type_ event_type = 3;
+
+	enum request_type_ {
+		DOOR_OPEN = 0;
+		DOOR_CLOSE = 1;
+		UNLOCK = 2;
+		LOCK = 3;
+		SET_TEMPERATURE = 4;
+		READ_REGISTER = 5;
+		WRITE_REGISTER = 6;
+		SET_POWER = 7;
+		SESSION_KEY_REQ = 8;
+	}
+
+	optional request_type_ request_type = 4;
+
+	enum response_type {
+		SUCCESS = 0;
+		FAIL = 1;
+		REGISTER_DATA = 2;
+		SESSION_KEY = 3;
+	}
+
+	optional response_type resp_type = 5;
+
+}
